@@ -1,0 +1,17 @@
+CSV: data\XAUUSD_M15_202202102100_202605070830.csv
+Models: models\backups\20260210_020005
+Data subset: 2022-02-23 19:00:00 to 2022-03-31 23:45:00
+Effective range: 2022-03-01 00:00:00 to 2022-03-31 23:45:00
+Total trades: 39
+Wins: 19
+Losses: 20
+Win rate: 48.7%
+Total profit: $133.66
+Total loss: $93.55
+Net P/L: $40.11
+Profit factor: 1.43
+Max drawdown: 0.6% ($30.99)
+Avg win: $7.03
+Avg loss: $4.68
+Expectancy: $1.03
+Sharpe ratio: 2.21

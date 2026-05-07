@@ -1,0 +1,69 @@
+======================================================================
+FULL CSV LIVE-SYNC BACKTEST
+======================================================================
+CSV: data\XAUUSD_M15_202202102100_202605070830.csv
+Models: models\backups\20260210_020005
+Requested range: 2020-01-01 00:00:00 to 2026-05-06 23:59:59
+Rows loaded: 99969
+Data subset range: 2022-02-10 21:00:00 to 2026-05-06 23:45:00
+Calculating indicators...
+Indicator columns: 78
+Effective backtest range: 2022-02-11 23:00:00 to 2026-05-06 23:45:00
+
+Running backtest (ML threshold: 50%)...
+  Date range: 2022-02-11 23:00:00 to 2026-05-05 21:45:00
+  Total bars: 99769
+  100 trades processed...
+  200 trades processed...
+  300 trades processed...
+  400 trades processed...
+  500 trades processed...
+  600 trades processed...
+  700 trades processed...
+  800 trades processed...
+  900 trades processed...
+  1000 trades processed...
+  1100 trades processed...
+  1200 trades processed...
+  1300 trades processed...
+  1400 trades processed...
+  1500 trades processed...
+  1600 trades processed...
+  1700 trades processed...
+  1800 trades processed...
+  1900 trades processed...
+
+======================================================================
+BACKTEST RESULTS
+======================================================================
+Effective range: 2022-02-11 23:00:00 to 2026-05-06 23:45:00
+Total Trades: 1918
+Wins: 916
+Losses: 1002
+Win Rate: 47.8%
+Total Profit: $8021.52
+Total Loss: $7026.79
+Net P/L: $994.73
+Profit Factor: 1.14
+Max Drawdown: 8.3% ($541.89)
+Avg Win: $8.76
+Avg Loss: $7.01
+Expectancy: $0.52
+Sharpe Ratio: 0.61
+Exit Reasons:
+  timeout: 820 (42.8%)
+  trend_reversal: 661 (34.5%)
+  take_profit: 399 (20.8%)
+  ml_reversal: 24 (1.3%)
+  max_loss: 14 (0.7%)
+Session Performance:
+  London-NY Overlap (Golden): 395 trades, 46.3% WR, $146.94
+  NY Session: 371 trades, 50.9% WR, $577.05
+  Sydney-Tokyo: 809 trades, 47.3% WR, $424.17
+  London Early: 280 trades, 46.4% WR, $-59.95
+  Tokyo-London Overlap: 63 trades, 49.2% WR, $-93.47
+Trades saved to: backtests\results\csv_backtest_full_20260507_142557.csv
+Summary saved to: backtests\results\csv_backtest_full_20260507_142557_summary.csv
+Saved trades: backtests\results\csv_backtest_full_20260507_142557.csv
+Saved summary: backtests\results\csv_backtest_full_20260507_142557_summary.txt
+======================================================================

@@ -1,0 +1,6 @@
+date:2026-02-11
+daily_loss:6.9799999999999995
+daily_profit:37.12000000000001
+consecutive_losses:1
+total_loss:0.3
+saved_at:2026-02-11T19:27:05.033750+07:00
