@@ -4,7 +4,7 @@ Configuration Module for Smart Trading Bot
 Defines trading parameters based on capital size.
 
 Capital Modes:
-- Small ($5,000): Risk 1.5%, Leverage 1:100 (Growth mode)
+- Small ($5,000): Risk 2.0%, Leverage 1:100 (Growth mode)
 - Medium ($50,000): Risk 0.5%, Leverage 1:30 (Preservation mode)
 """
 
@@ -172,7 +172,7 @@ class TradingConfig:
     
     # Sub-configurations
     risk: RiskConfig = field(default_factory=lambda: RiskConfig(
-        risk_per_trade=1.5,
+        risk_per_trade=2.0,
         max_daily_loss=3.0,
         max_leverage=100,
         max_positions=3,
@@ -238,12 +238,12 @@ class TradingConfig:
         Strategy: SMART SAFE - Mental health FIRST!
 
         Features:
-        - Risk 1% per trade
+        - Risk 2% per trade
         - Multiple positions allowed (max 3) based on market
         - Smart management (no hard SL)
         """
         self.risk = RiskConfig(
-            risk_per_trade=1.0,        # 1% = $50 risk per trade
+            risk_per_trade=2.0,        # 2% = $100 risk per trade
             max_daily_loss=3.0,        # 3% daily loss limit
             max_leverage=100,          # 1:100 leverage
             max_positions=3,           # Max 3 positions (based on market)

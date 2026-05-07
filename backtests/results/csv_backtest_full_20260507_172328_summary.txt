@@ -1,0 +1,19 @@
+CSV: data\XAUUSD_M15_202202102100_202605070830.csv
+Models: models\backups\20260210_020005
+Data subset: 2022-02-10 21:00:00 to 2026-05-06 23:45:00
+Effective range: 2022-02-11 23:00:00 to 2026-05-06 23:45:00
+Risk percent per trade: 2.0
+Lot limits: min=0.01, max=100.0, step=0.01
+Total trades: 1890
+Wins: 837
+Losses: 1053
+Win rate: 44.3%
+Total profit: $197390.97
+Total loss: $175051.47
+Net P/L: $22339.50
+Profit factor: 1.13
+Max drawdown: 43.1% ($3653.70)
+Avg win: $235.83
+Avg loss: $166.24
+Expectancy: $11.82
+Sharpe ratio: 0.64

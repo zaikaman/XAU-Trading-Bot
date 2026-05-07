@@ -308,14 +308,20 @@ class TradingBot:
     def _load_models(self) -> bool:
         """Load pre-trained models."""
         logger.info("Loading trained models...")
-        
+
+        backup_dir = self._latest_model_backup()
         models_ok = True
-        
+
         # Load HMM model
         try:
-            self.regime_detector.load()
+            hmm_path = self._resolve_model_path(
+                primary_path="models/hmm_regime.pkl",
+                backup_dir=backup_dir,
+                filename="hmm_regime.pkl",
+            )
+            self.regime_detector.load(str(hmm_path))
             if self.regime_detector.fitted:
-                logger.info("HMM Regime model loaded successfully")
+                logger.info(f"HMM Regime model loaded successfully from {hmm_path}")
             else:
                 logger.warning("HMM model not found or not fitted")
                 models_ok = False
@@ -325,9 +331,13 @@ class TradingBot:
         
         # Load ML V2 Model D
         try:
-            self.ml_model.load()
-            if self.ml_model.fitted:
-                logger.info("ML V2 Model D loaded successfully")
+            xgb_path = self._resolve_model_path(
+                primary_path="models/xgboost_model.pkl",
+                backup_dir=backup_dir,
+                filename="xgboost_model.pkl",
+            )
+            if self._load_ml_model(xgb_path):
+                logger.info(f"ML model loaded successfully from {xgb_path}")
                 logger.info(f"  Features: {len(self.ml_model.feature_names)}")
                 logger.info(f"  Type: {self.ml_model.model_type.value}")
             else:
@@ -344,6 +354,66 @@ class TradingBot:
             self._write_model_metrics()
 
         return models_ok
+
+    def _latest_model_backup(self) -> Optional[Path]:
+        """Return the newest backup directory that contains both live model files."""
+        backup_root = Path("models/backups")
+        if not backup_root.exists():
+            return None
+
+        candidates = []
+        for backup_dir in backup_root.iterdir():
+            if not backup_dir.is_dir():
+                continue
+            if (backup_dir / "xgboost_model.pkl").exists() and (backup_dir / "hmm_regime.pkl").exists():
+                candidates.append(backup_dir)
+
+        if not candidates:
+            logger.warning("No complete model backup found in models/backups")
+            return None
+
+        return sorted(candidates, key=lambda path: path.name, reverse=True)[0]
+
+    def _resolve_model_path(self, primary_path: str, backup_dir: Optional[Path], filename: str) -> Path:
+        """Use the primary model path when present, otherwise fall back to latest backup."""
+        primary = Path(primary_path)
+        if primary.exists():
+            return primary
+
+        if backup_dir:
+            backup_path = backup_dir / filename
+            if backup_path.exists():
+                logger.warning(f"Primary model missing: {primary}. Using backup: {backup_path}")
+                return backup_path
+
+        return primary
+
+    def _load_ml_model(self, model_path: Path) -> bool:
+        """Load a V2 model, with automatic fallback for legacy V1 backup files."""
+        candidate = TradingModelV2(
+            confidence_threshold=self.ml_model.confidence_threshold,
+            model_path=str(model_path),
+        )
+        candidate.load(str(model_path))
+
+        has_model = candidate.xgb_model is not None or candidate.lgb_model is not None
+        if candidate.fitted and has_model:
+            self.ml_model = candidate
+            return True
+
+        logger.warning(f"ML model at {model_path} is not V2-compatible, trying legacy V1 loader")
+        candidate = TradingModelV2(
+            confidence_threshold=self.ml_model.confidence_threshold,
+            model_path=str(model_path),
+        )
+        candidate.load_legacy_v1(str(model_path))
+
+        if candidate.fitted and candidate.xgb_model is not None:
+            self.ml_model = candidate
+            logger.info("Legacy V1 XGBoost model converted for live V2 runtime")
+            return True
+
+        return False
 
     def _dash_log(self, level: str, message: str):
         """Add log entry to dashboard buffer."""
@@ -2787,8 +2857,7 @@ class TradingBot:
                 logger.info("Retraining successful! Reloading models...")
 
                 # Reload the newly trained models
-                self.regime_detector.load()
-                self.ml_model.load()
+                self._load_models()
 
                 logger.info(f"  HMM: {'OK' if self.regime_detector.fitted else 'FAILED'}")
                 logger.info(f"  XGBoost: {'OK' if self.ml_model.fitted else 'FAILED'}")
@@ -2806,8 +2875,7 @@ class TradingBot:
                 if results.get("xgb_test_auc", 0) < 0.60:
                     logger.warning("New model AUC too low - rolling back!")
                     self.auto_trainer.rollback_models()
-                    self.regime_detector.load()
-                    self.ml_model.load()
+                    self._load_models()
                     logger.info("Rollback complete")
             else:
                 logger.error(f"Retraining failed: {results.get('error', 'Unknown error')}")

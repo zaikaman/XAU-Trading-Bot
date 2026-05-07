@@ -405,7 +405,17 @@ class LiveSyncBacktest:
 
         # Dynamic thresholds based on ATR (OPTIMIZED: configurable multiplier)
         reversal_momentum_threshold = atr * self.trend_reversal_mult  # OPTIMIZED: 0.6 default
-        min_loss_for_reversal_exit = atr * 0.8    # 80% of ATR = ~$10 equivalent
+
+        # Scale the original fixed-dollar smart-exit thresholds by configured risk.
+        # This preserves the historical 1% path while making 2% use equivalent
+        # thresholds instead of exiting earlier just because lot size doubled.
+        risk_scale = 1.0
+        if self.risk_percent_per_trade and self.risk_percent_per_trade > 0:
+            risk_scale = self.risk_percent_per_trade
+        stuck_profit_threshold = 5 * risk_scale
+        shallow_loss_threshold = -15 * risk_scale
+        significant_profit_threshold = 10 * risk_scale
+        min_loss_for_reversal_exit = atr * 0.8 * risk_scale
 
         # Get ML predictions for exit logic
         feature_cols = [f for f in self.ml_model.feature_names if f in df.columns]
@@ -473,17 +483,17 @@ class LiveSyncBacktest:
 
             # 4+ hours: Only exit if stuck (no profit growth) - SYNCED
             if bars_since_entry >= 16:
-                if current_profit < 5 and not profit_growing:
+                if current_profit < stuck_profit_threshold and not profit_growing:
                     # Stuck with no growth - exit
                     if current_profit >= 0:
                         return current_profit, current_pips, ExitReason.TIMEOUT, i, close
-                    elif current_profit > -15:
+                    elif current_profit > shallow_loss_threshold:
                         return current_profit, current_pips, ExitReason.TIMEOUT, i, close
                 # If profitable and growing and ML agrees - extend time (don't exit)
 
             # 6+ hours: Exit unless significantly profitable AND still growing
             if bars_since_entry >= 24:
-                if current_profit < 10 or not profit_growing:
+                if current_profit < significant_profit_threshold or not profit_growing:
                     return current_profit, current_pips, ExitReason.TIMEOUT, i, close
                 # If profit > $10 and growing, allow up to 8 hours (32 bars)
 
