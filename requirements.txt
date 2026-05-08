@@ -36,6 +36,7 @@ numpy>=1.26.0
 
 # HTTP Client (for Telegram)
 aiohttp>=3.9.0
+certifi>=2024.8.30
 
 # PostgreSQL Database
 psycopg2-binary>=2.9.9

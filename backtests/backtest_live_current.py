@@ -35,6 +35,7 @@ from src.dynamic_confidence import MarketQuality, create_dynamic_confidence
 from src.feature_eng import FeatureEngineer
 from src.regime_detector import MarketRegime, MarketRegimeDetector
 from src.smc_polars import SMCAnalyzer, SMCSignal
+from src.position_manager import SmartPositionManager
 from src.smart_risk_manager import ExitReason as SmartExitReason
 from src.smart_risk_manager import create_smart_risk_manager
 import src.smart_risk_manager as smart_risk_module
@@ -57,6 +58,16 @@ class HistoricalDateTime(datetime):
         if tz is None:
             return cls.current.replace(tzinfo=None)
         return cls.current.astimezone(tz)
+
+
+class BacktestRegimeValue:
+    def __init__(self, value: str):
+        self.value = value
+
+
+class BacktestRegimeState:
+    def __init__(self, value: str):
+        self.regime = BacktestRegimeValue(value)
 
 
 @dataclass
@@ -206,6 +217,23 @@ class LiveCurrentBacktest:
         self.smc = SMCAnalyzer()
         self.dynamic_confidence = create_dynamic_confidence()
         self.smart_risk = create_smart_risk_manager(capital=initial_capital)
+        # Backtests must not mutate live runtime risk-state files.
+        self.smart_risk._save_daily_state = lambda: None
+        self.smart_risk._total_loss = 0.0
+        self.smart_risk._state = smart_risk_module.RiskState()
+        self.position_manager = SmartPositionManager(
+            breakeven_pips=20.0,
+            trail_start_pips=35.0,
+            trail_step_pips=20.0,
+            atr_be_mult=2.0,
+            atr_trail_start_mult=3.0,
+            atr_trail_step_mult=2.0,
+            min_profit_to_protect=0.0,
+            max_drawdown_from_peak=40.0,
+            enable_market_close_handler=True,
+            min_profit_before_close=0.0,
+            max_loss_to_hold=0.0,
+        )
 
     def _set_historical_now(self, ts: datetime) -> None:
         wib_now = as_wib(ts)
@@ -284,6 +312,39 @@ class LiveCurrentBacktest:
                 mark = row["close"]
 
             current_profit = profit_for(pos, mark)
+            position_df = pl.DataFrame(
+                [
+                    {
+                        "ticket": pos.ticket,
+                        "type": pos.direction,
+                        "price_open": pos.entry_price,
+                        "sl": pos.stop_loss,
+                        "tp": pos.take_profit,
+                        "profit": current_profit,
+                        "volume": pos.lot_size,
+                    }
+                ]
+            )
+            pm_actions = self.position_manager.analyze_positions(
+                positions=position_df,
+                df_market=df.head(i + 1),
+                regime_state=BacktestRegimeState(regime),
+                ml_prediction=ml_pred,
+                current_price=mark,
+            )
+            position_closed = False
+            for action in pm_actions:
+                if action.ticket != ticket:
+                    continue
+                if action.action == "CLOSE":
+                    self._close_position(pos, i, ts, mark, f"position_manager:{action.reason}")
+                    position_closed = True
+                    break
+                if action.action == "TRAIL_SL" and action.new_sl:
+                    pos.stop_loss = action.new_sl
+            if position_closed:
+                continue
+
             market_context = {
                 "rsi": row.get("rsi"),
                 "macd_hist": row.get("macd_histogram"),

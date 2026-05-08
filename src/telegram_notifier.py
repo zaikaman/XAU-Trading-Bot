@@ -15,6 +15,7 @@ Features:
 
 import asyncio
 import os
+import ssl
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, field
@@ -96,6 +97,7 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.enabled = enabled
         self._session = None
+        self._ssl_context = None
 
         # Track daily stats
         self._daily_trades: List[TradeInfo] = []
@@ -123,8 +125,41 @@ class TelegramNotifier:
         """Get or create aiohttp session."""
         if self._session is None:
             import aiohttp
-            self._session = aiohttp.ClientSession()
+            connector = aiohttp.TCPConnector(ssl=self._get_ssl_context())
+            self._session = aiohttp.ClientSession(connector=connector)
         return self._session
+
+    def _get_ssl_context(self):
+        """Build SSL context for Telegram API requests."""
+        if self._ssl_context is not None:
+            return self._ssl_context
+
+        verify = os.getenv("TELEGRAM_SSL_VERIFY", "true").strip().lower()
+        if verify in {"0", "false", "no", "off"}:
+            logger.warning("Telegram SSL verification is DISABLED via TELEGRAM_SSL_VERIFY=false")
+            self._ssl_context = False
+            return self._ssl_context
+
+        ca_bundle = os.getenv("TELEGRAM_CA_BUNDLE", "").strip()
+        try:
+            if ca_bundle:
+                self._ssl_context = ssl.create_default_context(cafile=ca_bundle)
+                logger.info(f"Telegram SSL using custom CA bundle: {ca_bundle}")
+                return self._ssl_context
+
+            try:
+                import certifi
+                self._ssl_context = ssl.create_default_context(cafile=certifi.where())
+                logger.info("Telegram SSL using certifi CA bundle")
+            except ImportError:
+                self._ssl_context = ssl.create_default_context()
+                logger.info("Telegram SSL using system CA bundle")
+
+            return self._ssl_context
+        except Exception as e:
+            logger.warning(f"Telegram SSL context setup failed, using aiohttp default: {e}")
+            self._ssl_context = None
+            return self._ssl_context
 
     async def close(self):
         """Close the session."""
