@@ -68,7 +68,7 @@ class SmartMarketCloseHandler:
         daily_close_hour_wib: int = 5,      # 05:00 WIB = 5pm EST (previous day)
         hours_before_close: float = 2.0,     # Consider "near close" within 2 hours
         weekend_close_hour_wib: int = 5,     # Friday 5pm EST = Saturday 05:00 WIB
-        min_profit_to_take: float = 10.0,    # Minimum profit $ to take before close
+        min_profit_to_take: float = 0.0,     # Fallback only; live derives this from position SL risk
         max_loss_to_hold: float = 0.0,       # Fallback only; live derives this from SL risk
         weekend_loss_cut_percent: float = 50.0,  # Cut loss if > 50% of SL hit before weekend
     ):
@@ -84,6 +84,7 @@ class SmartMarketCloseHandler:
         profit: float,
         sl_distance_percent: float = 0.0,
         max_loss_to_hold: Optional[float] = None,
+        position_risk: float = 0.0,
     ) -> MarketCloseAnalysis:
         """
         Analyze position status relative to market close.
@@ -91,6 +92,7 @@ class SmartMarketCloseHandler:
         Args:
             profit: Current position profit/loss in $
             sl_distance_percent: How much of SL has been hit (0-100%)
+            position_risk: Dollar risk from entry to broker SL for this position
 
         Returns:
             MarketCloseAnalysis with recommendation
@@ -120,6 +122,7 @@ class SmartMarketCloseHandler:
             hours_to_close=hours_to_close,
             sl_distance_percent=sl_distance_percent,
             max_loss_to_hold=max_loss_to_hold if max_loss_to_hold is not None else self.max_loss_to_hold,
+            position_risk=position_risk,
         )
 
         return MarketCloseAnalysis(
@@ -185,6 +188,7 @@ class SmartMarketCloseHandler:
         hours_to_close: float,
         sl_distance_percent: float,
         max_loss_to_hold: float,
+        position_risk: float = 0.0,
     ) -> Tuple[str, str]:
         """
         Make smart recommendation based on conditions.
@@ -192,12 +196,15 @@ class SmartMarketCloseHandler:
         Returns:
             (recommendation, reason)
         """
+        profit_take_threshold = max(self.min_profit_to_take, position_risk * 0.10)
+
         # Case 1: In profit and near close -> TAKE PROFIT
-        if profit >= self.min_profit_to_take and near_close:
+        if profit_take_threshold > 0 and profit >= profit_take_threshold and near_close:
             urgency = "WEEKEND" if near_weekend else "daily"
             return (
                 "CLOSE_PROFIT",
-                f"Take profit ${profit:.2f} before {urgency} close ({hours_to_close:.1f}h remaining)"
+                f"Take profit ${profit:.2f} before {urgency} close "
+                f"(threshold ${profit_take_threshold:.2f}, {hours_to_close:.1f}h remaining)"
             )
 
         # Case 2: In loss, near weekend, and significant SL hit -> CUT LOSS
@@ -231,12 +238,16 @@ class SmartMarketCloseHandler:
                     f"Consider cutting large loss ${profit:.2f} before close (limit ${max_loss_to_hold:.2f})"
                 )
 
-        # Case 4: Small profit near close -> Consider taking
-        if profit > 0 and profit < self.min_profit_to_take and near_close:
+        # Case 4: Small profit near close -> Consider taking only if it is meaningful
+        if profit_take_threshold > 0 and profit > 0 and profit < profit_take_threshold and near_close:
             if hours_to_close < 0.5:  # Very close to close (30 min)
+                tiny_close_threshold = max(profit_take_threshold * 0.50, position_risk * 0.05)
+                if profit < tiny_close_threshold:
+                    return ("NORMAL", "No market close action needed")
                 return (
                     "CLOSE_PROFIT",
-                    f"Take small profit ${profit:.2f} (only {hours_to_close*60:.0f}min to close)"
+                    f"Take small profit ${profit:.2f} "
+                    f"(threshold ${tiny_close_threshold:.2f}, only {hours_to_close*60:.0f}min to close)"
                 )
 
         # Default: Normal operation
@@ -279,7 +290,7 @@ class SmartPositionManager:
         breakeven_pips: float = 15.0,      # Fallback if ATR unavailable
         trail_start_pips: float = 25.0,    # Fallback if ATR unavailable
         trail_step_pips: float = 10.0,     # Fallback if ATR unavailable
-        min_profit_to_protect: float = 50.0,  # Minimum $ profit to protect
+        min_profit_to_protect: float = 0.0,   # Fallback only; live derives this from position SL risk
         max_drawdown_from_peak: float = 30.0,  # Max % drawdown from peak profit
         # ATR-adaptive exit multipliers (#24B: backtest +$373)
         atr_be_mult: float = 2.0,          # Breakeven = ATR * 2.0
@@ -287,7 +298,7 @@ class SmartPositionManager:
         atr_trail_step_mult: float = 3.0,  # Trail step = ATR * 3.0
         # Market Close Handler settings
         enable_market_close_handler: bool = True,
-        min_profit_before_close: float = 10.0,  # Take profit if >= $10 near close
+        min_profit_before_close: float = 0.0,   # Fallback only; live derives this from position SL risk
         max_loss_to_hold: float = 0.0,     # Fallback only; live derives this from SL risk
     ):
         self.breakeven_pips = breakeven_pips
@@ -505,6 +516,7 @@ class SmartPositionManager:
                 profit=profit,
                 sl_distance_percent=sl_distance_percent,
                 max_loss_to_hold=max_loss_to_hold,
+                position_risk=position_risk,
             )
 
             if close_analysis.recommendation == "CLOSE_PROFIT":

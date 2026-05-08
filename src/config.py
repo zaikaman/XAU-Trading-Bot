@@ -4,8 +4,8 @@ Configuration Module for Smart Trading Bot
 Defines trading parameters based on capital size.
 
 Capital Modes:
-- Small ($5,000): Risk 2.0%, Leverage 1:100 (Growth mode)
-- Medium ($50,000): Risk 0.5%, Leverage 1:30 (Preservation mode)
+- Small: Risk 2.0% of current equity
+- Medium: Risk 2.0% of current equity
 """
 
 from dataclasses import dataclass, field
@@ -19,8 +19,8 @@ load_dotenv()
 
 class CapitalMode(Enum):
     """Trading mode based on capital size."""
-    SMALL = "small"      # $5,000 - Aggressive growth
-    MEDIUM = "medium"    # $50,000 - Capital preservation
+    SMALL = "small"
+    MEDIUM = "medium"
 
 
 @dataclass
@@ -30,7 +30,7 @@ class RiskConfig:
     max_daily_loss: float          # Maximum daily loss percentage
     max_leverage: int              # Maximum leverage ratio
     max_positions: int             # Maximum concurrent positions
-    max_lot_size: float            # Maximum lot size per trade
+    max_lot_size: float            # Optional strategy cap; <=0 disables cap
     min_lot_size: float            # Minimum lot size
     lot_step: float                # Lot size increment
     
@@ -176,7 +176,7 @@ class TradingConfig:
         max_daily_loss=3.0,
         max_leverage=100,
         max_positions=3,
-        max_lot_size=0.5,
+        max_lot_size=0.0,
         min_lot_size=0.01,
         lot_step=0.01,
     ))
@@ -243,11 +243,11 @@ class TradingConfig:
         - Smart management (no hard SL)
         """
         self.risk = RiskConfig(
-            risk_per_trade=2.0,        # 2% = $100 risk per trade
+            risk_per_trade=2.0,        # 2% of current equity risk per trade
             max_daily_loss=3.0,        # 3% daily loss limit
             max_leverage=100,          # 1:100 leverage
             max_positions=3,           # Max 3 positions (based on market)
-            max_lot_size=0.05,         # Max 0.05 lot
+            max_lot_size=0.0,          # Strategy cap disabled; broker max volume still applies
             min_lot_size=0.01,         # Min 0.01 lot
             lot_step=0.01,
         )
@@ -260,11 +260,11 @@ class TradingConfig:
         Strategy: Conservative, capital preservation
         """
         self.risk = RiskConfig(
-            risk_per_trade=0.5,        # 0.5% = $250 risk per trade
+            risk_per_trade=2.0,        # 2% of current equity risk per trade
             max_daily_loss=2.0,        # 2% daily loss limit
             max_leverage=30,           # 1:30 leverage (safer)
             max_positions=5,           # More diversification
-            max_lot_size=2.0,          # Max 2 lots
+            max_lot_size=0.0,          # Strategy cap disabled; broker max volume still applies
             min_lot_size=0.01,
             lot_step=0.01,
         )
@@ -311,20 +311,20 @@ class TradingConfig:
         account_balance: Optional[float] = None,
     ) -> float:
         """
-        Calculate position size based on Risk-Constrained Kelly Criterion.
+        Calculate position size from current equity and SL distance.
         
-        Formula: Lot Size = (Account Balance * Risk%) / (SL Distance in pips * Pip Value)
+        Formula: Lot Size = (Account Equity * Risk%) / SL dollar distance
         
         Args:
             entry_price: Entry price
             stop_loss_price: Stop loss price
-            account_balance: Current account balance (uses capital if None)
+            account_balance: Current account equity/balance (uses capital if None)
         
         Returns:
             Calculated lot size (rounded to lot_step)
         """
-        balance = account_balance or self.capital
-        risk_amount = balance * (self.risk.risk_per_trade / 100)
+        equity = account_balance or self.capital
+        risk_amount = equity * (self.risk.risk_per_trade / 100)
         
         # Calculate SL distance in price
         sl_distance = abs(entry_price - stop_loss_price)
@@ -332,26 +332,23 @@ class TradingConfig:
         if sl_distance == 0:
             return self.risk.min_lot_size
         
-        # For XAUUSD: 1 pip = 0.1, pip value per lot ~$1
-        # Simplified calculation - adjust pip_value based on symbol
         if "XAU" in self.symbol:
-            pip_value_per_lot = 1.0  # $1 per 0.1 move per lot
-            sl_pips = sl_distance / 0.1
+            # XAUUSD convention used by live runner: 1 lot = $1 per 0.01 price move.
+            dollar_distance_per_lot = sl_distance * 100
         else:
-            pip_value_per_lot = 10.0  # Standard forex
-            sl_pips = sl_distance / 0.0001
+            pips = sl_distance / 0.0001
+            dollar_distance_per_lot = pips * 10.0
         
-        # Calculate lot size
-        lot_size = risk_amount / (sl_pips * pip_value_per_lot)
-        
-        # Apply Half-Kelly for safety (reduces volatility)
-        lot_size *= 0.5
+        lot_size = risk_amount / dollar_distance_per_lot if dollar_distance_per_lot > 0 else 0
         
         # Round to lot step
         lot_size = round(lot_size / self.risk.lot_step) * self.risk.lot_step
         
-        # Apply limits
-        lot_size = max(self.risk.min_lot_size, min(lot_size, self.risk.max_lot_size))
+        # Apply minimum only. Strategy max cap is disabled when max_lot_size <= 0;
+        # live execution still applies broker min/step/max volume limits.
+        lot_size = max(self.risk.min_lot_size, lot_size)
+        if self.risk.max_lot_size and self.risk.max_lot_size > 0:
+            lot_size = min(lot_size, self.risk.max_lot_size)
         
         return lot_size
     

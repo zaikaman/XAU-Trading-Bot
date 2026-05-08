@@ -141,8 +141,8 @@ class TradingBot:
         self._h1_df_cached = None  # Cache H1 DataFrame with indicators for V2 features
 
         # Initialize Smart Position Manager — EXIT STRATEGY v4 "Patient Recovery"
-        # Philosophy: Let trades BREATHE. Don't cut winners at $3-4.
-        # Regime danger only at $8+. Give losers room to recover.
+        # Philosophy: Let trades breathe. Don't manage a $100k account with
+        # small-account fixed dollar thresholds.
         self.position_manager = SmartPositionManager(
             breakeven_pips=20.0,       # Fallback if ATR unavailable
             trail_start_pips=35.0,     # Fallback if ATR unavailable
@@ -150,11 +150,11 @@ class TradingBot:
             atr_be_mult=2.0,           # v4: BE at 2x ATR (from 1.0) — don't lock too early
             atr_trail_start_mult=3.0,  # v4: Trail at 3x ATR (from 2.0) — let profit run
             atr_trail_step_mult=2.0,   # v4: Trail step 2x ATR (from 1.5)
-            min_profit_to_protect=8.0, # v4: Regime/signal exit only at $8+ (from $3)
+            min_profit_to_protect=0.0,
             max_drawdown_from_peak=40.0,  # v4: Allow 40% drawdown (from 25%)
             # Smart Market Close Handler
             enable_market_close_handler=True,
-            min_profit_before_close=3.0,   # v4: from $2
+            min_profit_before_close=0.0,
             max_loss_to_hold=0.0,      # Loss hold/cut threshold is derived from position SL risk
         )
 
@@ -429,6 +429,10 @@ class TradingBot:
         self.config.capital = float(account_equity)
         self.config._configure_by_capital()
         self._apply_env_risk_overrides()
+        if not os.getenv("RISK_PER_TRADE"):
+            self.config.risk.risk_per_trade = self.smart_risk.max_loss_per_trade_percent
+        if not os.getenv("MAX_POSITION_SIZE"):
+            self.config.risk.max_lot_size = 0.0  # Strategy lot cap disabled; broker limits still apply.
         self.smart_risk.update_capital(float(account_equity))
 
         logger.info(f"Capital synced from MT5 equity: ${old_capital:,.2f} -> ${account_equity:,.2f}")
@@ -747,14 +751,14 @@ class TradingBot:
             return {
                 "mode": rec.get("mode", "normal"),
                 "reason": rec.get("reason", ""),
-                "recommendedLot": rec.get("recommended_lot", 0.01),
-                "maxAllowedLot": rec.get("max_lot", 0.03),
+                "recommendedLot": None,
+                "maxAllowedLot": None,
                 "totalLoss": rec.get("total_loss", 0.0),
-                "maxTotalLoss": self.smart_risk.max_total_loss_usd,
+                "maxTotalLoss": None,
                 "remainingDailyRisk": rec.get("remaining_daily_risk", 0.0),
             }
         except Exception:
-            return {"mode": "unknown", "reason": "", "recommendedLot": 0.01, "maxAllowedLot": 0.03, "totalLoss": 0.0, "maxTotalLoss": 0.0, "remainingDailyRisk": 0.0}
+            return {"mode": "unknown", "reason": "", "recommendedLot": None, "maxAllowedLot": None, "totalLoss": 0.0, "maxTotalLoss": None, "remainingDailyRisk": 0.0}
 
     def _get_cooldown_status(self) -> dict:
         """Get trade cooldown info for dashboard."""
@@ -908,8 +912,12 @@ class TradingBot:
         logger.info(f"Strategy: {exit_str}")
         logger.info("=" * 60)
         logger.info(f"Symbol: {self.config.symbol}")
-        logger.info(f"Capital: ${self.config.capital:,.2f}")
-        logger.info(f"Mode: {self.config.capital_mode.value}")
+        if self.simulation:
+            logger.info(f"Risk Baseline: simulation capital ${self.config.capital:,.2f}")
+            logger.info(f"Mode: {self.config.capital_mode.value}")
+        else:
+            logger.info(f"Risk Baseline: pending MT5 equity sync (config fallback ${self.config.capital:,.2f})")
+            logger.info(f"Mode before sync: {self.config.capital_mode.value}")
         logger.info(f"Simulation: {self.simulation}")
         logger.info("=" * 60)
         
@@ -1387,7 +1395,7 @@ class TradingBot:
         Add to Winner (Pyramiding): Buka trade ke-2 saat trade pertama sudah profit.
 
         Rules:
-        1. Trade pertama harus profit >= $8 (ATR-scaled)
+        1. First trade profit must reach the ATR-scaled threshold
         2. Ticket belum pernah trigger pyramid sebelumnya
         3. SMC signal >= 75% sama arah
         4. ML prediction setuju sama arah
@@ -2317,13 +2325,11 @@ class TradingBot:
 
     async def _execute_trade_safe(self, signal: SMCSignal, position, regime_state):
         """
-        Execute trade dengan mode ULTRA SAFE v2.
+        Execute trade with equity-based risk sizing.
 
-        PRINSIP:
-        1. Lot size SANGAT KECIL (0.01-0.03)
-        2. Emergency broker SL sebagai safety net (2% = ~$100)
-        3. Software S/L lebih ketat (1% = ~$50)
-        4. Smart management untuk exit (ML reversal detection)
+        Lot size is calculated before this call from current MT5 equity,
+        target risk percent, and broker SL distance. Emergency SL is a
+        broker safety net at the same equity-scaled risk budget.
         """
         # Calculate emergency broker SL (safety net)
         emergency_sl = self.smart_risk.calculate_emergency_sl(

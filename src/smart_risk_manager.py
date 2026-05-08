@@ -4,7 +4,7 @@ Smart Risk Manager v2.0
 Sistem risk management cerdas untuk mencegah kerugian besar.
 
 FILOSOFI: "Slow but Steady - Mental Health First"
-- Lot size SANGAT KECIL (0.01-0.03)
+- Equity-based lot sizing from current risk budget and SL distance
 - TANPA hard stop loss (menggunakan soft management)
 - Hanya close jika trend BENAR-BENAR berbalik
 - Recovery mode setelah loss
@@ -360,12 +360,12 @@ class SmartRiskManager:
     Smart Risk Manager - Sistem manajemen risiko cerdas.
 
     PRINSIP UTAMA:
-    1. Lot size SANGAT KECIL (0.01-0.03 max)
+    1. Lot size is derived from current equity, risk percent, and SL distance
     2. TIDAK menggunakan hard stop loss
     3. Hanya close jika trend BENAR-BENAR berbalik (ML confidence tinggi)
     4. Maximum loss per hari: 5% of capital
     5. Total loss is tracked for reporting only, not used to stop trading
-    6. S/L 1% per trade
+    6. S/L 2% per trade by current equity
     7. Recovery mode setelah loss besar
     """
 
@@ -374,10 +374,10 @@ class SmartRiskManager:
         capital: float = 5000.0,
         max_daily_loss_percent: float = 5.0,      # Max 5% daily loss
         max_total_loss_percent: float = 0.0,      # Disabled: total loss is tracked only
-        max_loss_per_trade_percent: float = 0.5,  # Max 0.5% per trade (FIX 5: was 1.0%, ~$25 for $5k capital)
+        max_loss_per_trade_percent: float = 2.0,  # Max 2% per trade by current equity
         emergency_sl_percent: float = 2.0,        # Emergency broker S/L 2% per trade
         base_lot_size: float = 0.01,              # Lot dasar sangat kecil
-        max_lot_size: float = 0.03,               # Maximum lot
+        max_lot_size: float = 0.0,                # Strategy cap disabled; broker max still applies
         recovery_lot_size: float = 0.01,          # Lot saat recovery
         trend_reversal_threshold: float = 0.75,   # ML confidence untuk close
         max_concurrent_positions: int = 2,        # Max posisi bersamaan
@@ -637,7 +637,7 @@ class SmartRiskManager:
         Calculate emergency stop loss price (broker level).
 
         This is the LAST LINE OF DEFENSE if software fails.
-        Set at 2% of capital (~$100) as max loss per trade.
+        Set at 2% of current equity as max loss per trade.
 
         Args:
             entry_price: Entry price of the trade
@@ -768,8 +768,8 @@ class SmartRiskManager:
         effective_confidence = min(confidence, ml_confidence)
 
         if effective_confidence >= 0.65:
-            # High confidence: allow max lot
-            lot = self.max_lot_size
+            # High confidence: allow legacy max lot only if explicitly configured.
+            lot = self.max_lot_size if self.max_lot_size > 0 else self.base_lot_size
             confidence_tier = "HIGH"
         elif effective_confidence >= 0.55:
             # Medium confidence: base lot
@@ -785,8 +785,9 @@ class SmartRiskManager:
             lot = self.recovery_lot_size
             confidence_tier = "VOLATILE"
 
-        # Cap at maximum
-        lot = min(lot, self._state.max_allowed_lot)
+        # Cap at maximum only when a legacy strategy cap is explicitly configured.
+        if self._state.max_allowed_lot and self._state.max_allowed_lot > 0:
+            lot = min(lot, self._state.max_allowed_lot)
 
         # Round to 0.01
         lot = round(lot, 2)
@@ -991,24 +992,25 @@ class SmartRiskManager:
 
         return profit_mult, loss_mult
 
-    def _calculate_fuzzy_exit_threshold(self, current_profit: float) -> float:
+    def _calculate_fuzzy_exit_threshold(self, current_profit: float, tier_unit: float = 0.0) -> float:
         """
-        FIX 1 (v0.1.1): Tiered fuzzy exit thresholds based on profit magnitude.
+        Tiered fuzzy exit thresholds based on profit magnitude.
 
         BEFORE: Fixed 90% threshold for all profits
         AFTER: Dynamic thresholds:
-          - Micro (<$1): 70% -> exit early
-          - Small ($1-$3): 75% -> protection
-          - Medium ($3-$8): 85% -> hold longer
-          - Large (>$8): 90% -> maximize
+          - Micro (<0.15 ATR/R unit): 70% -> exit early
+          - Small (<0.35 ATR/R unit): 75% -> protection
+          - Medium (<0.60 ATR/R unit): 85% -> hold longer
+          - Large: 90% -> maximize
 
         Returns threshold value 0.0-1.0
         """
-        if current_profit < 1.0:
+        unit = tier_unit if tier_unit and tier_unit > 0 else 1.0
+        if current_profit < unit * 0.15:
             return 0.70  # Micro: exit early
-        elif current_profit < 3.0:
+        elif current_profit < unit * 0.35:
             return 0.75  # Small: protect
-        elif current_profit < 8.0:
+        elif current_profit < unit * 0.60:
             return 0.85  # Medium: hold
         else:
             return 0.90  # Large: maximize
@@ -1171,7 +1173,11 @@ class SmartRiskManager:
         # Slow loss/recovery -> long grace (10-12 min)
 
         # v0.2.5 FIX #3: Track if trade was ever profitable
-        if current_profit > 0.50 and not guard.ever_profitable:
+        meaningful_profit = max(tp_early_min * 0.25, effective_max_loss * 0.0025)
+        recovery_improvement_threshold = max(tp_early_min * 0.50, effective_max_loss * 0.02)
+        near_breakeven_threshold = -max(tp_early_min * 0.25, effective_max_loss * 0.01)
+
+        if current_profit > meaningful_profit and not guard.ever_profitable:
             guard.ever_profitable = True
 
         is_golden = market_context.get("is_golden", False) if market_context else False
@@ -1262,7 +1268,7 @@ class SmartRiskManager:
             if self.fuzzy_controller is not None:
                 # Calculate profit retention
                 # FIX v0.1.2: Small loss after small profit = micro swing, bukan collapse
-                if current_profit < 0 and 0 < guard.peak_profit < 300:  # Peak <$3
+                if current_profit < 0 and 0 < guard.peak_profit < tp_early_min:
                     # Small loss after small profit: treat as medium retention (0.5)
                     # Prevents false "collapsed" trigger (retention < 0.3 -> 95% exit)
                     profit_retention = 0.50
@@ -1316,7 +1322,10 @@ class SmartRiskManager:
                         recovery_amount = pred_1m - current_profit
                         can_hold_never_prof = (
                             is_golden
-                            and (recovery_amount > 3.0 or pred_1m > -2.0)  # Recovery or near-breakeven
+                            and (
+                                recovery_amount > recovery_improvement_threshold
+                                or pred_1m > near_breakeven_threshold
+                            )
                             and predictions.get('confidence', 0) > 0.75
                             and _accel > 0.005  # Relaxed threshold
                         )
@@ -1349,8 +1358,8 @@ class SmartRiskManager:
                             # We'll apply this threshold adjustment below in profit-tier logic
 
                     # 3. RECOVERY STRENGTH: Special handling for recovering positions
-                    if self.recovery_detector is not None and guard.peak_loss < -3.0:
-                        # Position had significant loss (< -$3), check recovery strength
+                    if self.recovery_detector is not None and guard.peak_loss < -recovery_improvement_threshold:
+                        # Position had meaningful risk-scaled loss; check recovery strength.
                         is_strong_recovery, recovery_metrics = self.recovery_detector.analyze_recovery_strength(
                             profit_history=guard.profit_history,
                             peak_loss=guard.peak_loss,
@@ -1380,14 +1389,14 @@ class SmartRiskManager:
                     # === PROFIT TRADES: Hold longer for better gains ===
 
                     # FIX v0.1.3: Use tiered fuzzy threshold function (FIX 1 v0.1.1 finally active!)
-                    fuzzy_threshold = self._calculate_fuzzy_exit_threshold(current_profit)
+                    fuzzy_threshold = self._calculate_fuzzy_exit_threshold(current_profit, atr_unit)
 
                     # Determine tier for logging
-                    if current_profit < 1.0:
+                    if current_profit < atr_unit * 0.15:
                         tier = "MICRO"
-                    elif current_profit < 3.0:
+                    elif current_profit < atr_unit * 0.35:
                         tier = "SMALL"
-                    elif current_profit < 8.0:
+                    elif current_profit < atr_unit * 0.60:
                         tier = "MEDIUM"
                     else:
                         tier = "LARGE"
@@ -1430,7 +1439,7 @@ class SmartRiskManager:
 
                     # Apply recovery strength adjustment (if recovering from loss)
                     if (_PREDICTIVE_ENABLED and self.recovery_detector is not None and
-                        guard.peak_loss < -3.0 and len(guard.profit_history) >= 5):
+                        guard.peak_loss < -recovery_improvement_threshold and len(guard.profit_history) >= 5):
                         is_strong, metrics = self.recovery_detector.analyze_recovery_strength(
                             guard.profit_history, guard.peak_loss, guard.velocity_history
                         )
@@ -1587,10 +1596,10 @@ class SmartRiskManager:
                 recovery_amount = pred_1m - current_profit
 
                 # Recovery conditions (ANY of these = override):
-                # 1. Significant recovery: predict >$3 improvement
-                # 2. Near-breakeven: predict loss <$2 (small loss acceptable)
-                significant_recovery = recovery_amount > 3.0
-                near_breakeven = pred_1m > -2.0
+                # 1. Significant recovery: improvement is meaningful versus current risk
+                # 2. Near-breakeven: predicted loss is small versus current risk
+                significant_recovery = recovery_amount > recovery_improvement_threshold
+                near_breakeven = pred_1m > near_breakeven_threshold
                 strong_confidence = pred_conf > 0.75
                 positive_momentum = _accel > 0.005  # Relaxed from 0.01
 
@@ -1610,24 +1619,22 @@ class SmartRiskManager:
                     f"after {trade_age_seconds:.0f}s in Golden Session — cutting fast"
                 )
 
-        # === CHECK 0A: BREAKEVEN SHIELD (percentage-based, dynamic) ===
-        # v5: Protect ANY meaningful profit from becoming a loss.
-        # Uses percentage drawdown from peak (not fixed ATR threshold).
-        # Peak $3+ -> protect if drops below $1.50
-        # Peak $6+ -> protect if drops 70%+ from peak
-        # Peak $10+ -> protect if drops 60%+ from peak
-        # v5c: min peak raised $3->$5, min age raised 5->8 min (patient protection)
-        if atr_unit > 0 and trade_age_minutes >= 8 and guard.peak_profit >= 5.0:
-            if guard.peak_profit >= 10.0:
-                max_drawdown_pct = 0.60  # Peak $10+: protect at 60% drawdown
-            elif guard.peak_profit >= 6.0:
-                max_drawdown_pct = 0.70  # Peak $6+: protect at 70% drawdown
+        # === CHECK 0A: BREAKEVEN SHIELD (risk/ATR based) ===
+        # Protect meaningful profit from becoming a loss without using fixed
+        # small-account dollar floors.
+        be_shield_trigger = max(tp_min, effective_max_loss * 0.05)
+        be_medium_trigger = max(tp_secure, effective_max_loss * 0.08)
+        be_large_trigger = max(tp_hard * 0.50, effective_max_loss * 0.12)
+        if atr_unit > 0 and trade_age_minutes >= 8 and guard.peak_profit >= be_shield_trigger:
+            if guard.peak_profit >= be_large_trigger:
+                max_drawdown_pct = 0.60
+            elif guard.peak_profit >= be_medium_trigger:
+                max_drawdown_pct = 0.70
             else:
-                max_drawdown_pct = 0.80  # Peak $5+: protect at 80% drawdown
+                max_drawdown_pct = 0.80
 
             profit_floor = guard.peak_profit * (1 - max_drawdown_pct)
-            # Floor must be at least $1.50 to avoid micro-profit exits
-            profit_floor = max(profit_floor, 1.50)
+            profit_floor = max(profit_floor, be_shield_trigger * 0.25)
 
             if current_profit <= profit_floor and guard.peak_profit > profit_floor:
                 return True, ExitReason.TAKE_PROFIT, (
@@ -1635,11 +1642,10 @@ class SmartRiskManager:
                     f"— {max_drawdown_pct:.0%} drawdown protection (floor=${profit_floor:.1f})"
                 )
 
-        # === CHECK 0A.5: DEAD ZONE PROTECTION (v6) ===
-        # Protect trades with peak $3-5 that have no other protection.
-        # BE-SHIELD kicks in at $5+, so this covers the gap below.
-        if trade_age_minutes >= 5 and guard.peak_profit >= 3.0 and guard.peak_profit < 5.0:
-            deadzone_floor = max(0.50, guard.peak_profit * 0.33)
+        # === CHECK 0A.5: DEAD ZONE PROTECTION (v6, risk/ATR based) ===
+        deadzone_trigger = max(tp_early_min, effective_max_loss * 0.025)
+        if trade_age_minutes >= 5 and guard.peak_profit >= deadzone_trigger and guard.peak_profit < be_shield_trigger:
+            deadzone_floor = max(deadzone_trigger * 0.25, guard.peak_profit * 0.33)
             if current_profit <= deadzone_floor:
                 return True, ExitReason.TAKE_PROFIT, (
                     f"[DEADZONE] Securing ${current_profit:.2f} — "
@@ -2203,10 +2209,10 @@ def create_smart_risk_manager(capital: float = 5000.0) -> SmartRiskManager:
         capital=capital,
         max_daily_loss_percent=5.0,         # Max 5% daily loss
         max_total_loss_percent=0.0,         # Disabled: no permanent stop by total loss
-        max_loss_per_trade_percent=2.0,     # Default live risk: 2% per trade (~$100 for $5k)
+        max_loss_per_trade_percent=2.0,     # Default live risk: 2% of current MT5 equity
         emergency_sl_percent=2.0,           # Emergency broker SL 2% per trade
         base_lot_size=0.01,                 # Base lot 0.01 (minimum)
-        max_lot_size=0.05,                  # Small-account cap from TradingConfig
+        max_lot_size=0.0,                   # Strategy lot cap disabled; broker max volume still applies
         recovery_lot_size=0.01,             # Saat recovery tetap 0.01
         trend_reversal_threshold=0.65,      # Close jika ML 65%+ yakin (lebih sensitif)
         max_concurrent_positions=2,         # Max 2 posisi bersamaan

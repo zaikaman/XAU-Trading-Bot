@@ -82,7 +82,7 @@ class RiskEngine:
         Check current risk status.
         
         Args:
-            account_balance: Current account balance
+            account_balance: Current account equity/balance used as risk baseline
             account_equity: Current account equity
             open_positions: DataFrame of open positions
             current_price: Current market price
@@ -242,21 +242,23 @@ class RiskEngine:
         # Use Half-Kelly for safety
         half_kelly = kelly * 0.5
         
-        # Apply regime multiplier
+        # Live execution targets the configured risk percent exactly. Kelly and
+        # regime inputs are retained for compatibility but do not reduce the
+        # 2%-of-equity sizing contract.
         adjusted_kelly = half_kelly * regime_multiplier
-        
-        # Calculate risk amount (but cap at config limit)
+
+        # Calculate risk amount from current equity/balance and configured risk percent.
         max_risk_percent = self.risk_config.risk_per_trade / 100
-        actual_risk_percent = min(adjusted_kelly, max_risk_percent)
+        actual_risk_percent = max_risk_percent
         risk_amount = account_balance * actual_risk_percent
         
         # Calculate lot size
         # For XAUUSD: pip value varies, using simplified calculation
         symbol = self.config.symbol
         if "XAU" in symbol:
-            # Gold: $1 per 0.01 lot per point ($0.1 move)
+            # XAUUSD convention used by live runner: 1 lot = $1 per 0.01 price move.
             pip_value_per_lot = 1.0
-            pips = stop_distance / 0.1
+            pips = stop_distance / 0.01
         else:
             # Standard forex
             pip_value_per_lot = 10.0
@@ -267,9 +269,13 @@ class RiskEngine:
         else:
             lot_size = 0
         
-        # Round to lot step and apply limits
+        # Round to lot step and apply broker/minimum limits. Strategy-level max lot
+        # is disabled when max_lot_size <= 0; live sizing should be capped only by
+        # broker volume limits, not by a small-account configuration value.
         lot_size = round(lot_size / self.risk_config.lot_step) * self.risk_config.lot_step
-        lot_size = max(self.risk_config.min_lot_size, min(lot_size, self.risk_config.max_lot_size))
+        lot_size = max(self.risk_config.min_lot_size, lot_size)
+        if self.risk_config.max_lot_size and self.risk_config.max_lot_size > 0:
+            lot_size = min(lot_size, self.risk_config.max_lot_size)
         
         # Validate position
         approved = True
@@ -336,7 +342,7 @@ class RiskEngine:
         # Check lot size
         if lot_size < self.risk_config.min_lot_size:
             return False, f"Lot size below minimum: {lot_size} < {self.risk_config.min_lot_size}"
-        if lot_size > self.risk_config.max_lot_size:
+        if self.risk_config.max_lot_size and self.risk_config.max_lot_size > 0 and lot_size > self.risk_config.max_lot_size:
             return False, f"Lot size above maximum: {lot_size} > {self.risk_config.max_lot_size}"
         
         # Check entry price deviation from current
@@ -347,7 +353,7 @@ class RiskEngine:
         # Calculate risk
         stop_distance = abs(entry_price - stop_loss)
         if "XAU" in self.config.symbol:
-            pips = stop_distance / 0.1
+            pips = stop_distance / 0.01
             pip_value = 1.0
         else:
             pips = stop_distance / 0.0001
