@@ -425,14 +425,13 @@ class SmartRiskManager:
             else:
                 version_str = "v0.1.0 (Exit v6.0 Kalman)"
         logger.info(f"SMART RISK MANAGER {version_str} INITIALIZED")
-        logger.info(f"  Capital: ${capital:,.2f}")
-        logger.info(f"  Max Daily Loss: {max_daily_loss_percent}% (${self.max_daily_loss_usd:.2f})")
+        logger.info("  Risk Baseline: pending MT5 equity sync")
+        logger.info(f"  Max Daily Loss: {max_daily_loss_percent}% of current equity")
         logger.info("  Max Total Loss: DISABLED (tracking only)")
-        logger.info(f"  Software S/L: {max_loss_per_trade_percent}% (${self.max_loss_per_trade:.2f})")
-        logger.info(f"  Emergency Broker S/L: {emergency_sl_percent}% (${self.emergency_sl_usd:.2f})")
+        logger.info(f"  Software S/L: {max_loss_per_trade_percent}% of current equity / position SL risk")
+        logger.info(f"  Emergency Broker S/L: {emergency_sl_percent}% of current equity")
         logger.info(f"  Max Positions: {max_concurrent_positions}")
-        logger.info(f"  Base Lot: {base_lot_size}")
-        logger.info(f"  Max Lot: {max_lot_size}")
+        logger.info("  Lot Sizing: 2% equity risk by SL distance (broker volume limits only)")
         logger.info("  Mode: SMART S/L (software + broker safety net)")
         if _ADVANCED_EXITS_ENABLED:
             if _PREDICTIVE_ENABLED:
@@ -1142,15 +1141,19 @@ class SmartRiskManager:
         tp_small_max = 0.30 * profit_mult * atr_unit   # Dynamic small max
         tp_early_min = 0.15 * profit_mult * atr_unit   # Dynamic early exit min
 
-        # Loss thresholds: base * loss_mult * atr_unit
-        max_atr_loss = 0.60 * loss_mult * atr_unit     # Dynamic hard stop
+        # Loss thresholds: base * loss_mult * atr_unit.
+        # Hard loss boundaries must not undercut the 2% equity/SL risk budget.
+        atr_loss_signal = 0.60 * loss_mult * atr_unit
+        max_atr_loss = max(atr_loss_signal, effective_max_loss)
         stall_loss = -0.35 * loss_mult * atr_unit      # Dynamic stall
         reversal_loss = -0.20 * loss_mult * atr_unit   # Dynamic reversal
         warn_loss = -0.30 * loss_mult * atr_unit       # Dynamic warning
         timeout_loss = -0.35 * loss_mult * atr_unit    # Dynamic timeout
         stagnant_loss = 0.25 * loss_mult * atr_unit    # Dynamic stagnation
 
-        # v0.2.5 FIX #4: max_atr_loss ratchet — can only tighten
+        # v0.2.5 FIX #4: max_atr_loss ratchet — can only tighten, but never
+        # below the equity risk budget.
+        guard.tightest_atr_loss = max(guard.tightest_atr_loss, effective_max_loss)
         if max_atr_loss < guard.tightest_atr_loss:
             guard.tightest_atr_loss = max_atr_loss
         else:
@@ -1230,7 +1233,7 @@ class SmartRiskManager:
                 logger.info(
                     f"[DYNAMIC] #{ticket} regime={regime} state={trade_state}{_golden_tag} "
                     f"P×{profit_mult:.2f} L×{loss_mult:.2f} | "
-                    f"tp_min=${tp_min:.1f} max_loss=${max_atr_loss:.1f} eff_max=${effective_max_loss:.1f} "
+                    f"tp_min=${tp_min:.1f} atr_loss_signal=${atr_loss_signal:.1f} risk_budget=${effective_max_loss:.1f} "
                     f"ratchet=${guard.tightest_max_loss:.1f} grace={grace_minutes:.1f}m "
                     f"ever_profit={_ever_prof}"
                 )
