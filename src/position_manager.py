@@ -479,6 +479,10 @@ class SmartPositionManager:
             self._peak_profits[ticket] = max(self._peak_profits[ticket], profit)
 
         peak_profit = self._peak_profits[ticket]
+        position_risk = 0.0
+        if current_sl > 0 and entry_price > 0:
+            position_risk = abs(entry_price - current_sl) * volume * 100
+        profit_protect_threshold = max(self.min_profit_to_protect, position_risk * 0.25)
 
         # === CLOSE CONDITIONS ===
 
@@ -524,16 +528,19 @@ class SmartPositionManager:
                 # Continue to check other conditions, but this gives context
 
         # 1. Regime change to dangerous
-        if market["regime"] in ["crisis", "high_volatility"] and profit > self.min_profit_to_protect:
+        if market["regime"] in ["crisis", "high_volatility"] and profit > profit_protect_threshold:
             return PositionAction(
                 ticket=ticket,
                 action="CLOSE",
-                reason=f"Regime danger ({market['regime']}) - Securing ${profit:.2f} profit",
+                reason=(
+                    f"Regime danger ({market['regime']}) - Securing ${profit:.2f} profit "
+                    f"(threshold ${profit_protect_threshold:.2f})"
+                ),
             )
 
         # 2. Strong opposite signal — only exit at substantial profit (v5)
         # min_profit_to_protect / 2 was too low ($4), now requires 75% of threshold
-        signal_exit_threshold = self.min_profit_to_protect * 0.75
+        signal_exit_threshold = profit_protect_threshold * 0.75
         if is_buy and market["should_exit_longs"] and profit > signal_exit_threshold:
             return PositionAction(
                 ticket=ticket,
@@ -548,7 +555,7 @@ class SmartPositionManager:
             )
 
         # 3. Drawdown from peak profit
-        if peak_profit > self.min_profit_to_protect:
+        if peak_profit > profit_protect_threshold:
             drawdown_pct = ((peak_profit - profit) / peak_profit) * 100 if peak_profit > 0 else 0
             if drawdown_pct > self.max_drawdown_from_peak:
                 return PositionAction(
@@ -558,7 +565,7 @@ class SmartPositionManager:
                 )
 
         # 4. High urgency — only exit at substantial profit (v4: raised from $0)
-        if market["urgency"] >= 8 and profit > self.min_profit_to_protect:
+        if market["urgency"] >= 8 and profit > profit_protect_threshold:
             return PositionAction(
                 ticket=ticket,
                 action="CLOSE",
