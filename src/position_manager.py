@@ -69,7 +69,7 @@ class SmartMarketCloseHandler:
         hours_before_close: float = 2.0,     # Consider "near close" within 2 hours
         weekend_close_hour_wib: int = 5,     # Friday 5pm EST = Saturday 05:00 WIB
         min_profit_to_take: float = 10.0,    # Minimum profit $ to take before close
-        max_loss_to_hold: float = 100.0,     # Max loss $ to hold over close
+        max_loss_to_hold: float = 0.0,       # Fallback only; live derives this from SL risk
         weekend_loss_cut_percent: float = 50.0,  # Cut loss if > 50% of SL hit before weekend
     ):
         self.daily_close_hour_wib = daily_close_hour_wib
@@ -79,7 +79,12 @@ class SmartMarketCloseHandler:
         self.max_loss_to_hold = max_loss_to_hold
         self.weekend_loss_cut_percent = weekend_loss_cut_percent
 
-    def analyze(self, profit: float, sl_distance_percent: float = 0.0) -> MarketCloseAnalysis:
+    def analyze(
+        self,
+        profit: float,
+        sl_distance_percent: float = 0.0,
+        max_loss_to_hold: Optional[float] = None,
+    ) -> MarketCloseAnalysis:
         """
         Analyze position status relative to market close.
 
@@ -114,6 +119,7 @@ class SmartMarketCloseHandler:
             near_weekend=near_weekend,
             hours_to_close=hours_to_close,
             sl_distance_percent=sl_distance_percent,
+            max_loss_to_hold=max_loss_to_hold if max_loss_to_hold is not None else self.max_loss_to_hold,
         )
 
         return MarketCloseAnalysis(
@@ -178,6 +184,7 @@ class SmartMarketCloseHandler:
         near_weekend: bool,
         hours_to_close: float,
         sl_distance_percent: float,
+        max_loss_to_hold: float,
     ) -> Tuple[str, str]:
         """
         Make smart recommendation based on conditions.
@@ -200,10 +207,10 @@ class SmartMarketCloseHandler:
                     "CUT_LOSS_WEEKEND",
                     f"Cut loss ${profit:.2f} before weekend (SL {sl_distance_percent:.0f}% hit, gap risk)"
                 )
-            elif abs(profit) > self.max_loss_to_hold:
+            elif max_loss_to_hold > 0 and abs(profit) > max_loss_to_hold:
                 return (
                     "CUT_LOSS_WEEKEND",
-                    f"Cut large loss ${profit:.2f} before weekend (gap risk)"
+                    f"Cut large loss ${profit:.2f} before weekend (gap risk, limit ${max_loss_to_hold:.2f})"
                 )
             else:
                 return (
@@ -213,7 +220,7 @@ class SmartMarketCloseHandler:
 
         # Case 3: In loss, near daily close but not weekend -> HOLD
         if profit < 0 and near_close and not near_weekend:
-            if abs(profit) <= self.max_loss_to_hold:
+            if max_loss_to_hold <= 0 or abs(profit) <= max_loss_to_hold:
                 return (
                     "HOLD_LOSS",
                     f"Hold loss ${profit:.2f} over daily close (may recover tomorrow)"
@@ -221,7 +228,7 @@ class SmartMarketCloseHandler:
             else:
                 return (
                     "CUT_LOSS_WEEKEND",  # Reuse for large daily loss
-                    f"Consider cutting large loss ${profit:.2f} before close"
+                    f"Consider cutting large loss ${profit:.2f} before close (limit ${max_loss_to_hold:.2f})"
                 )
 
         # Case 4: Small profit near close -> Consider taking
@@ -281,7 +288,7 @@ class SmartPositionManager:
         # Market Close Handler settings
         enable_market_close_handler: bool = True,
         min_profit_before_close: float = 10.0,  # Take profit if >= $10 near close
-        max_loss_to_hold: float = 100.0,   # Hold loss up to $100 over close
+        max_loss_to_hold: float = 0.0,     # Fallback only; live derives this from SL risk
     ):
         self.breakeven_pips = breakeven_pips
         self.trail_start_pips = trail_start_pips
@@ -484,10 +491,16 @@ class SmartPositionManager:
                 if max_loss_distance > 0:
                     current_loss_distance = abs(current_price - entry_price) if profit < 0 else 0
                     sl_distance_percent = (current_loss_distance / max_loss_distance) * 100
+                    max_loss_to_hold = max_loss_distance * volume * 100
+                else:
+                    max_loss_to_hold = self.market_close_handler.max_loss_to_hold
+            else:
+                max_loss_to_hold = self.market_close_handler.max_loss_to_hold
 
             close_analysis = self.market_close_handler.analyze(
                 profit=profit,
                 sl_distance_percent=sl_distance_percent,
+                max_loss_to_hold=max_loss_to_hold,
             )
 
             if close_analysis.recommendation == "CLOSE_PROFIT":

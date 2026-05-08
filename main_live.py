@@ -155,7 +155,7 @@ class TradingBot:
             # Smart Market Close Handler
             enable_market_close_handler=True,
             min_profit_before_close=3.0,   # v4: from $2
-            max_loss_to_hold=10.0,     # v4: Max loss $10 per position (from $5)
+            max_loss_to_hold=0.0,      # Loss hold/cut threshold is derived from position SL risk
         )
 
         # Initialize Session Filter (WIB timezone for Batam)
@@ -415,23 +415,23 @@ class TradingBot:
 
         return False
 
-    def _sync_capital_from_account(self, account_balance: float):
-        """Use the connected MT5 balance as the live capital baseline."""
-        if not account_balance or account_balance <= 0:
-            logger.warning("Could not sync capital from MT5 account balance")
+    def _sync_capital_from_account(self, account_equity: float):
+        """Use the connected MT5 equity as the live risk baseline."""
+        if not account_equity or account_equity <= 0:
+            logger.warning("Could not sync capital from MT5 account equity")
             return
 
         old_capital = self.config.capital
-        if abs(old_capital - account_balance) < 0.01:
-            self.smart_risk.update_capital(account_balance)
+        if abs(old_capital - account_equity) < 0.01:
+            self.smart_risk.update_capital(account_equity)
             return
 
-        self.config.capital = float(account_balance)
+        self.config.capital = float(account_equity)
         self.config._configure_by_capital()
         self._apply_env_risk_overrides()
-        self.smart_risk.update_capital(float(account_balance))
+        self.smart_risk.update_capital(float(account_equity))
 
-        logger.info(f"Capital synced from MT5 balance: ${old_capital:,.2f} -> ${account_balance:,.2f}")
+        logger.info(f"Capital synced from MT5 equity: ${old_capital:,.2f} -> ${account_equity:,.2f}")
         logger.info(f"Mode after sync: {self.config.capital_mode.value}")
 
     def _apply_env_risk_overrides(self):
@@ -666,7 +666,8 @@ class TradingBot:
                     "riskPerTrade": self.smart_risk.max_loss_per_trade_percent,
                     "maxDailyLoss": self.smart_risk.max_daily_loss_percent,
                     "maxPositions": self.smart_risk.max_concurrent_positions,
-                    "maxLotSize": self.smart_risk.max_lot_size,
+                    "maxLotSize": None,
+                    "positionSizing": "2% equity risk",
                     "leverage": self.config.risk.max_leverage,
                     "executionTF": self.config.execution_timeframe,
                     "trendTF": self.config.trend_timeframe,
@@ -928,7 +929,7 @@ class TradingBot:
             equity = self.mt5.account_equity
             logger.info(f"Account Balance: ${balance:,.2f}")
             logger.info(f"Account Equity: ${equity:,.2f}")
-            self._sync_capital_from_account(balance)
+            self._sync_capital_from_account(equity or balance)
 
             # Show session status
             session_status = self.session_filter.get_status_report()
@@ -1496,14 +1497,29 @@ class TradingBot:
                     reason=f"PYRAMID: Add to winner #{ticket} (profit=${profit:.2f})",
                 )
 
-                # Use same lot size as original trade
                 sl_distance = abs(entry_price - pyramid_signal.stop_loss)
-                risk_amount = lot_size * sl_distance * 10
-                account_balance = self.mt5.account_balance or self.config.capital
-                risk_percent = (risk_amount / account_balance) * 100
+                account_equity = self.mt5.account_equity or self.mt5.account_balance or self.config.capital
+                risk_per_trade = self.config.risk.risk_per_trade
+                risk_budget = account_equity * (risk_per_trade / 100)
+                if sl_distance <= 0:
+                    continue
+
+                broker_info = self.mt5.get_symbol_info(self.config.symbol) if hasattr(self.mt5, "get_symbol_info") else None
+                lot_step = float((broker_info or {}).get("volume_step") or self.config.risk.lot_step)
+                min_lot = float((broker_info or {}).get("volume_min") or self.config.risk.min_lot_size)
+                broker_max_lot = (broker_info or {}).get("volume_max")
+
+                pyramid_lot = round((risk_budget / (sl_distance * 100)) / lot_step) * lot_step
+                pyramid_lot = max(min_lot, pyramid_lot)
+                if broker_max_lot:
+                    pyramid_lot = min(pyramid_lot, float(broker_max_lot))
+                pyramid_lot = round(pyramid_lot, 2)
+
+                risk_amount = pyramid_lot * sl_distance * 100
+                risk_percent = (risk_amount / account_equity) * 100 if account_equity > 0 else 0
 
                 pyramid_pos = SimpleNamespace(
-                    lot_size=lot_size,  # Same lot as original
+                    lot_size=pyramid_lot,
                     risk_amount=risk_amount,
                     risk_percent=risk_percent,
                 )
@@ -1616,6 +1632,7 @@ class TradingBot:
         # 6. Check if trading is allowed
         account_balance = self.mt5.account_balance or self.config.capital
         account_equity = self.mt5.account_equity or self.config.capital
+        self.smart_risk.update_capital(account_equity)
         open_positions = self.mt5.get_open_positions(
             symbol=self.config.symbol,
             magic=self.config.magic_number,
@@ -1891,35 +1908,16 @@ class TradingBot:
             return
 
         raw_lot = risk_budget / (sl_distance * 100)
-        lot_step = self.config.risk.lot_step
+        broker_info = self.mt5.get_symbol_info(self.config.symbol) if hasattr(self.mt5, "get_symbol_info") else None
+        lot_step = float((broker_info or {}).get("volume_step") or self.config.risk.lot_step)
+        min_lot = float((broker_info or {}).get("volume_min") or self.config.risk.min_lot_size)
+        broker_max_lot = (broker_info or {}).get("volume_max")
+
         safe_lot = round(raw_lot / lot_step) * lot_step
-        safe_lot = max(
-            self.config.risk.min_lot_size,
-            min(safe_lot, self.config.risk.max_lot_size),
-        )
+        safe_lot = max(min_lot, safe_lot)
+        if broker_max_lot:
+            safe_lot = min(safe_lot, float(broker_max_lot))
         safe_lot = round(safe_lot, 2)
-
-        # SmartRiskManager still supplies mode gates and max allowed lot caps.
-        safe_lot = min(safe_lot, self.smart_risk.get_state().max_allowed_lot)
-
-        # Apply session multiplier (Sydney = 0.5x for safety)
-        session_mult = getattr(self, '_current_session_multiplier', 1.0)
-        if session_mult < 1.0:
-            original_lot = safe_lot
-            safe_lot = max(0.01, round(safe_lot * session_mult, 2))  # Minimum 0.01, rounded to 0.01 step
-            sydney_mode = getattr(self, '_is_sydney_session', False)
-            if sydney_mode:
-                logger.info(f"Sydney SAFE MODE: Lot {original_lot:.2f} -> {safe_lot:.2f} (0.5x)")
-
-        # v6.1: NIGHT SAFETY - Lot reduction for late night hours (22:00-05:59 WIB)
-        # Night trading has lower win rate (14%) and higher loss risk
-        # Reduce lot by 50% to minimize damage from night volatility
-        wib_hour = datetime.now(ZoneInfo("Asia/Jakarta")).hour
-        is_night_hours = wib_hour >= 22 or wib_hour <= 5
-        if is_night_hours:
-            original_lot = safe_lot
-            safe_lot = max(0.01, round(safe_lot * 0.5, 2))  # 50% reduction
-            logger.warning(f"NIGHT SAFETY MODE: Lot {original_lot:.2f} -> {safe_lot:.2f} (0.5x) - WIB {wib_hour}:xx (high risk hours)")
 
         if safe_lot <= 0:
             logger.debug("Smart Risk: Lot size is 0 - skipping trade")
@@ -1936,7 +1934,7 @@ class TradingBot:
 
         # Calculate risk amount at broker SL using same XAUUSD convention as sizing.
         risk_amount = safe_lot * sl_distance * 100
-        risk_percent = (risk_amount / account_balance) * 100
+        risk_percent = (risk_amount / account_equity) * 100 if account_equity > 0 else 0
 
         position_result = SafePosition(
             lot_size=safe_lot,
@@ -1946,8 +1944,8 @@ class TradingBot:
 
         logger.info(
             f"Smart Risk: Lot={safe_lot}, Risk=${risk_amount:.2f} "
-            f"({risk_percent:.2f}%), Target={risk_per_trade:.2f}%, Mode={risk_rec['mode']}, "
-            f"Regime={regime_name}"
+            f"({risk_percent:.2f}% of equity), Target={risk_per_trade:.2f}%, "
+            f"Mode={risk_rec['mode']}, Regime={regime_name}"
         )
 
         # 13. Check position limit (max 2 concurrent positions)
@@ -2438,6 +2436,7 @@ class TradingBot:
                 entry_price=entry_price_actual,  # Actual entry price
                 lot_size=lot_size_actual,        # Actual filled volume
                 direction=signal.signal_type,
+                max_loss_usd=position.risk_amount,
             )
 
             # Get current regime and volatility for notification

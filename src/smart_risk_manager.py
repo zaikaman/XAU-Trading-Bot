@@ -45,7 +45,7 @@ class ExitReason(Enum):
     TREND_REVERSAL = "trend_reversal"      # ML signal berbalik KUAT
     DAILY_LIMIT = "daily_limit"            # Mencapai daily loss limit
     POSITION_LIMIT = "position_limit"      # Mencapai max loss per trade (S/L)
-    TOTAL_LIMIT = "total_limit"            # Mencapai total loss limit
+    TOTAL_LIMIT = "total_limit"            # Deprecated: total loss limit disabled
     WEEKEND_CLOSE = "weekend_close"        # Menjelang weekend
     MANUAL = "manual"
 
@@ -79,7 +79,7 @@ class PositionGuard:
     soft_stop_triggered: bool = False
 
     # Hard protection (hanya close jika ini tercapai)
-    max_loss_usd: float = 50.0  # Maximum loss $50 per position
+    max_loss_usd: float = 0.0  # Filled from equity risk budget when registered
 
     # Profit tracking
     peak_profit: float = 0
@@ -364,7 +364,7 @@ class SmartRiskManager:
     2. TIDAK menggunakan hard stop loss
     3. Hanya close jika trend BENAR-BENAR berbalik (ML confidence tinggi)
     4. Maximum loss per hari: 5% of capital
-    5. Maximum total loss: 10% of capital (stop trading)
+    5. Total loss is tracked for reporting only, not used to stop trading
     6. S/L 1% per trade
     7. Recovery mode setelah loss besar
     """
@@ -373,7 +373,7 @@ class SmartRiskManager:
         self,
         capital: float = 5000.0,
         max_daily_loss_percent: float = 5.0,      # Max 5% daily loss
-        max_total_loss_percent: float = 10.0,     # Max 10% total loss (stop trading)
+        max_total_loss_percent: float = 0.0,      # Disabled: total loss is tracked only
         max_loss_per_trade_percent: float = 0.5,  # Max 0.5% per trade (FIX 5: was 1.0%, ~$25 for $5k capital)
         emergency_sl_percent: float = 2.0,        # Emergency broker S/L 2% per trade
         base_lot_size: float = 0.01,              # Lot dasar sangat kecil
@@ -427,7 +427,7 @@ class SmartRiskManager:
         logger.info(f"SMART RISK MANAGER {version_str} INITIALIZED")
         logger.info(f"  Capital: ${capital:,.2f}")
         logger.info(f"  Max Daily Loss: {max_daily_loss_percent}% (${self.max_daily_loss_usd:.2f})")
-        logger.info(f"  Max Total Loss: {max_total_loss_percent}% (${self.max_total_loss_usd:.2f})")
+        logger.info("  Max Total Loss: DISABLED (tracking only)")
         logger.info(f"  Software S/L: {max_loss_per_trade_percent}% (${self.max_loss_per_trade:.2f})")
         logger.info(f"  Emergency Broker S/L: {emergency_sl_percent}% (${self.emergency_sl_usd:.2f})")
         logger.info(f"  Max Positions: {max_concurrent_positions}")
@@ -613,14 +613,17 @@ class SmartRiskManager:
 
     def update_capital(self, new_capital: float):
         """Update capital and recalculate ALL limits."""
+        old_capital = self.capital
         self.capital = new_capital
         self.max_daily_loss_usd = new_capital * (self.max_daily_loss_percent / 100)
         self.max_total_loss_usd = new_capital * (self.max_total_loss_percent / 100)
         self.max_loss_per_trade = new_capital * (self.max_loss_per_trade_percent / 100)
         self.emergency_sl_usd = new_capital * (self.emergency_sl_percent / 100)
+        if abs(old_capital - new_capital) < 1.0:
+            return
         logger.info(f"Capital updated: ${new_capital:.2f}")
         logger.info(f"  Daily loss limit: {self.max_daily_loss_percent}% = ${self.max_daily_loss_usd:.2f}")
-        logger.info(f"  Total loss limit: {self.max_total_loss_percent}% = ${self.max_total_loss_usd:.2f}")
+        logger.info("  Total loss limit: DISABLED (tracking only)")
         logger.info(f"  Software S/L: {self.max_loss_per_trade_percent}% = ${self.max_loss_per_trade:.2f}")
         logger.info(f"  Emergency Broker S/L: {self.emergency_sl_percent}% = ${self.emergency_sl_usd:.2f}")
 
@@ -696,27 +699,11 @@ class SmartRiskManager:
         """Update risk state based on daily and total performance."""
         net_pnl = self._state.daily_profit - self._state.daily_loss
 
-        # Check TOTAL loss limit (10%) - highest priority
-        if self._total_loss >= self.max_total_loss_usd:
-            self._state.mode = TradingMode.STOPPED
-            self._state.can_trade = False
-            self._state.reason = f"TOTAL LOSS LIMIT reached ({self.max_total_loss_percent}% = ${self._total_loss:.2f}) - TRADING STOPPED"
-            return
-
         # Check daily loss limit (5%)
         if self._state.daily_loss >= self.max_daily_loss_usd:
             self._state.mode = TradingMode.STOPPED
             self._state.can_trade = False
             self._state.reason = f"Daily loss limit reached ({self.max_daily_loss_percent}% = ${self._state.daily_loss:.2f})"
-            return
-
-        # Check if approaching TOTAL limit (80%)
-        if self._total_loss >= self.max_total_loss_usd * 0.8:
-            self._state.mode = TradingMode.PROTECTED
-            self._state.recommended_lot = self.recovery_lot_size
-            self._state.max_allowed_lot = self.recovery_lot_size
-            self._state.reason = f"Approaching TOTAL loss limit ({self._total_loss:.2f}/${self.max_total_loss_usd:.2f}) - protected mode"
-            self._state.can_trade = True
             return
 
         # Check if approaching daily limit (80%)
@@ -815,13 +802,14 @@ class SmartRiskManager:
         entry_price: float,
         lot_size: float,
         direction: str,
+        max_loss_usd: Optional[float] = None,
     ) -> PositionGuard:
         """
         Register a new position for monitoring.
 
         TIDAK menggunakan hard stop loss.
         Menggunakan soft management berdasarkan:
-        - Maximum loss per position ($30-50)
+        - Maximum loss per position from equity risk budget / broker SL risk
         - Trend reversal (ML confidence tinggi berlawanan)
         """
         guard = PositionGuard(
@@ -830,11 +818,12 @@ class SmartRiskManager:
             entry_time=datetime.now(WIB),
             lot_size=lot_size,
             direction=direction,
-            max_loss_usd=self.max_loss_per_trade,
+            max_loss_usd=max_loss_usd if max_loss_usd is not None else self.max_loss_per_trade,
         )
+        guard.tightest_max_loss = guard.max_loss_usd
 
         self._position_guards[ticket] = guard
-        logger.info(f"Position #{ticket} registered - NO HARD SL, max loss ${self.max_loss_per_trade}")
+        logger.info(f"Position #{ticket} registered - NO HARD SL, max loss ${guard.max_loss_usd}")
 
         return guard
 
@@ -850,7 +839,7 @@ class SmartRiskManager:
         Auto-register posisi yang sudah ada (dari sebelum bot start).
 
         Penting untuk memastikan SEMUA posisi terlindungi oleh:
-        - Max loss $50 per trade
+        - Max loss from equity risk budget / broker SL risk
         - ML reversal detection
         - Daily loss tracking
         """
@@ -868,6 +857,7 @@ class SmartRiskManager:
             current_profit=current_profit,
             peak_profit=max(0, current_profit),  # Track peak dari sekarang
         )
+        guard.tightest_max_loss = guard.max_loss_usd
 
         self._position_guards[ticket] = guard
         logger.info(f"Position #{ticket} AUTO-REGISTERED (existing) - Protected with max loss ${self.max_loss_per_trade}")
@@ -1094,6 +1084,7 @@ class SmartRiskManager:
         guard = self._position_guards.get(ticket)
         if not guard:
             return False, None, "Position not registered"
+        predictions = None
 
         # === ATR-BASED DYNAMIC SCALING ===
         # ATR ratio: data-driven volatility multiplier (replaces fixed session multiplier)
@@ -1106,7 +1097,12 @@ class SmartRiskManager:
         # ATR in dollars for this position (XAUUSD: 1 point = $1 per 0.01 lot)
         atr_dollars = current_atr * guard.lot_size * 100 if current_atr > 0 else 0
 
-        effective_max_loss = self.max_loss_per_trade * sm
+        # Use the larger live equity risk budget and the at-entry position risk.
+        # This keeps loss management aligned with 2% account-equity risk instead
+        # of legacy fixed-dollar caps.
+        equity_risk_budget = self.max_loss_per_trade
+        position_risk_budget = guard.max_loss_usd if guard.max_loss_usd > 0 else equity_risk_budget
+        effective_max_loss = max(equity_risk_budget, position_risk_budget) * sm
 
         # === v0.2.5 FIX #4: MONOTONIC RATCHET — max_loss can only TIGHTEN ===
         # Once a tighter max_loss is calculated, it can never widen back.
@@ -1400,7 +1396,7 @@ class SmartRiskManager:
                     if (_PREDICTIVE_ENABLED and self.trajectory_predictor is not None and
                         len(guard.velocity_history) >= 3):
                         # Get trajectory prediction (already calculated above)
-                        pred_1m = predictions.get('pred_1m', 0) if 'predictions' in locals() else None
+                        pred_1m = predictions.get('pred_1m', 0) if predictions else None
                         if pred_1m is not None and pred_1m < 0:
                             # Crash predicted! Lower threshold by 10% (exit faster)
                             crash_penalty = 0.10
@@ -1517,9 +1513,8 @@ class SmartRiskManager:
 
                     # Lower threshold for losses (75%)
                     if exit_confidence > 0.75:
-                        # v0.2.5f: Only suppress tiny losses (<$2) during grace
-                        # BUG FIX: was 200 (=$200, never triggers) → 2.0 (=$2)
-                        if in_grace_period and abs(current_profit) < 2.0:
+                        tiny_loss_threshold = effective_max_loss * 0.02
+                        if in_grace_period and abs(current_profit) < tiny_loss_threshold:
                             logger.info(
                                 f"[GRACE PERIOD] Loss fuzzy={exit_confidence:.2%} suppressed "
                                 f"(t={trade_age_seconds:.0f}s < {grace_period_sec:.0f}s, loss=${current_profit:.2f})"
@@ -1537,8 +1532,8 @@ class SmartRiskManager:
                             exit_confidence, current_profit, tp_hard
                         )
                         if should_exit and close_fraction > 0.3:
-                            # v0.2.5f: Only suppress tiny losses (<$2) during grace
-                            if in_grace_period and abs(current_profit) < 2.0:
+                            tiny_loss_threshold = effective_max_loss * 0.02
+                            if in_grace_period and abs(current_profit) < tiny_loss_threshold:
                                 logger.info(
                                     f"[GRACE PERIOD] Kelly loss exit suppressed "
                                     f"(t={trade_age_seconds:.0f}s < {grace_period_sec:.0f}s)"
@@ -1550,20 +1545,19 @@ class SmartRiskManager:
 
         # === PRIORITY 0: EMERGENCY SAFETY CHECKS ===
 
-        # CHECK -1: NO RECOVERY ZONE ($15 threshold)
-        # If loss >= $15, exit immediately - no point waiting for recovery
-        # v0.2.5f: Fixed unit — current_profit is in DOLLARS (was 1500=$1500, never triggered)
-        NO_RECOVERY_THRESHOLD = 15.0  # $15.00
+        # CHECK -1: NO RECOVERY ZONE
+        # Legacy used a fixed $15 cap, which undercut 2% risk sizing on larger equity.
+        # Keep this tied to the current 2% equity risk budget instead.
+        NO_RECOVERY_THRESHOLD = effective_max_loss
         if current_profit <= -NO_RECOVERY_THRESHOLD:
             return True, ExitReason.POSITION_LIMIT, (
                 f"[NO RECOVERY] Loss ${abs(current_profit):.2f} too deep "
                 f"(threshold ${NO_RECOVERY_THRESHOLD:.2f}) - cut immediately"
             )
 
-        # CHECK 0: EMERGENCY CAP ($20)
-        # Absolute maximum loss cap - last resort protection
-        # v0.2.5f: Fixed unit — current_profit is in DOLLARS (was 2000=$2000, never triggered)
-        EMERGENCY_MAX_LOSS = 20.0  # $20.00
+        # CHECK 0: EMERGENCY CAP
+        # Same boundary as the 2% equity budget; broker SL is still the real safety net.
+        EMERGENCY_MAX_LOSS = effective_max_loss
         if current_profit <= -EMERGENCY_MAX_LOSS:
             return True, ExitReason.POSITION_LIMIT, (
                 f"[EMERGENCY CAP] Max loss ${abs(current_profit):.2f} exceeded "
@@ -1574,8 +1568,9 @@ class SmartRiskManager:
         # Never-profitable trades in Golden Session with steep loss → cut fast
         # BUT: if trajectory predicts strong recovery, give it time
         # Golden = extreme volatility, if -$5+ in 60s and never profitable, check trajectory
+        golden_emergency_loss = -(effective_max_loss * 0.25)
         if (is_golden and not guard.ever_profitable
-                and current_profit < -5.0 and trade_age_seconds >= 60):
+                and current_profit < golden_emergency_loss and trade_age_seconds >= 60):
 
             # v0.2.7f: Check if trajectory predicts RECOVERY (not just profit)
             # Key insight: recovery = pred_1m - current_profit
@@ -2014,7 +2009,7 @@ class SmartRiskManager:
         # Also uses loss_mult floor of 0.8 so ML disagreement can't crush threshold
         # to $4-5 (which fires on normal gold noise within seconds).
         backup_loss_mult = max(0.7, loss_mult)  # v6: relaxed 0.8->0.7 (ML fix makes band-aid unnecessary)
-        backup_pct = min(0.30, 0.20 * backup_loss_mult)  # Cap at 30% of max_loss
+        backup_pct = 1.0
         if trade_age_minutes >= grace_minutes and current_profit <= -(effective_max_loss * backup_pct):
             return True, ExitReason.POSITION_LIMIT, (
                 f"[BACKUP-SL] Loss ${abs(current_profit):.2f} ({backup_pct:.0%} of "
@@ -2117,16 +2112,8 @@ class SmartRiskManager:
             self._state.last_loss_amount = loss_amount
             logger.warning(f"LOSS recorded: -${loss_amount:.2f} | Daily loss: ${self._state.daily_loss:.2f} | Total Loss: ${self._total_loss:.2f}")
 
-            # Check if we should stop - TOTAL loss limit
-            if self._total_loss >= self.max_total_loss_usd:
-                self._state.mode = TradingMode.STOPPED
-                self._state.can_trade = False
-                result["total_limit_hit"] = True
-                result["can_trade"] = False
-                logger.error(f"TOTAL LOSS LIMIT REACHED ({self.max_total_loss_percent}%) - TRADING STOPPED PERMANENTLY")
-
             # Check if we should stop - daily loss limit
-            elif self._state.daily_loss >= self.max_daily_loss_usd:
+            if self._state.daily_loss >= self.max_daily_loss_usd:
                 self._state.mode = TradingMode.STOPPED
                 self._state.can_trade = False
                 result["daily_limit_hit"] = True
@@ -2161,7 +2148,7 @@ class SmartRiskManager:
             "daily_net": self._state.daily_profit - self._state.daily_loss,
             "remaining_daily_risk": max(0, self.max_daily_loss_usd - self._state.daily_loss),
             "total_loss": self._total_loss,
-            "remaining_total_risk": max(0, self.max_total_loss_usd - self._total_loss),
+            "remaining_total_risk": None,
             "max_loss_per_trade": self.max_loss_per_trade,
             "consecutive_losses": self._state.consecutive_losses,
         }
@@ -2196,7 +2183,7 @@ class SmartRiskManager:
             f"Capital: ${self.capital:.2f}",
             f"",
             f"Daily Loss: ${self._state.daily_loss:.2f} / ${self.max_daily_loss_usd:.2f} ({self.max_daily_loss_percent}%)",
-            f"Total Loss: ${self._total_loss:.2f} / ${self.max_total_loss_usd:.2f} ({self.max_total_loss_percent}%)",
+            f"Total Loss: ${self._total_loss:.2f} (limit disabled)",
             f"S/L Per Trade: ${self.max_loss_per_trade:.2f} ({self.max_loss_per_trade_percent}%)",
             f"",
             f"Mode: {self._state.mode.value}",
@@ -2212,7 +2199,7 @@ def create_smart_risk_manager(capital: float = 5000.0) -> SmartRiskManager:
     return SmartRiskManager(
         capital=capital,
         max_daily_loss_percent=5.0,         # Max 5% daily loss
-        max_total_loss_percent=10.0,        # Max 10% total loss (stop trading)
+        max_total_loss_percent=0.0,         # Disabled: no permanent stop by total loss
         max_loss_per_trade_percent=2.0,     # Default live risk: 2% per trade (~$100 for $5k)
         emergency_sl_percent=2.0,           # Emergency broker SL 2% per trade
         base_lot_size=0.01,                 # Base lot 0.01 (minimum)
@@ -2233,7 +2220,7 @@ if __name__ == "__main__":
     print("\n=== Risk Settings ===")
     print(f"Capital: ${manager.capital:.2f}")
     print(f"Daily Loss Limit: {manager.max_daily_loss_percent}% = ${manager.max_daily_loss_usd:.2f}")
-    print(f"Total Loss Limit: {manager.max_total_loss_percent}% = ${manager.max_total_loss_usd:.2f}")
+    print("Total Loss Limit: DISABLED (tracking only)")
     print(f"S/L Per Trade: {manager.max_loss_per_trade_percent}% = ${manager.max_loss_per_trade:.2f}")
 
     print("\n=== Risk State ===")
