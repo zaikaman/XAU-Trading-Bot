@@ -1648,8 +1648,10 @@ class SmartRiskManager:
             profit_floor = max(profit_floor, be_shield_trigger * 0.25)
 
             if current_profit <= profit_floor and guard.peak_profit > profit_floor:
-                return True, ExitReason.TAKE_PROFIT, (
-                    f"[BE-SHIELD] Was +${guard.peak_profit:.2f}, now ${current_profit:+.2f} "
+                exit_reason = ExitReason.TAKE_PROFIT if current_profit > 0 else ExitReason.TREND_REVERSAL
+                action_text = "Securing profit" if current_profit > 0 else "Cutting profit collapse"
+                return True, exit_reason, (
+                    f"[BE-SHIELD] {action_text}: was +${guard.peak_profit:.2f}, now ${current_profit:+.2f} "
                     f"— {max_drawdown_pct:.0%} drawdown protection (floor=${profit_floor:.1f})"
                 )
 
@@ -1658,8 +1660,10 @@ class SmartRiskManager:
         if trade_age_minutes >= 5 and guard.peak_profit >= deadzone_trigger and guard.peak_profit < be_shield_trigger:
             deadzone_floor = max(deadzone_trigger * 0.25, guard.peak_profit * 0.33)
             if current_profit <= deadzone_floor:
-                return True, ExitReason.TAKE_PROFIT, (
-                    f"[DEADZONE] Securing ${current_profit:.2f} — "
+                exit_reason = ExitReason.TAKE_PROFIT if current_profit > 0 else ExitReason.TREND_REVERSAL
+                action_text = "Securing profit" if current_profit > 0 else "Cutting profit collapse"
+                return True, exit_reason, (
+                    f"[DEADZONE] {action_text} ${current_profit:+.2f} — "
                     f"peak ${guard.peak_profit:.2f} floor ${deadzone_floor:.2f} "
                     f"(age {trade_age_minutes:.1f}m)"
                 )
