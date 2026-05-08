@@ -1176,6 +1176,7 @@ class SmartRiskManager:
         meaningful_profit = max(tp_early_min * 0.25, effective_max_loss * 0.0025)
         recovery_improvement_threshold = max(tp_early_min * 0.50, effective_max_loss * 0.02)
         near_breakeven_threshold = -max(tp_early_min * 0.25, effective_max_loss * 0.01)
+        profit_exit_floor = max(tp_early_min, effective_max_loss * 0.025)
 
         if current_profit > meaningful_profit and not guard.ever_profitable:
             guard.ever_profitable = True
@@ -1474,10 +1475,20 @@ class SmartRiskManager:
 
                     # High confidence exit (unless trajectory override or peak hold)
                     peak_suppression = getattr(guard, 'peak_hold_active', False)
-                    if exit_confidence > fuzzy_threshold and not trajectory_override and not peak_suppression:
+                    if (
+                        current_profit >= profit_exit_floor
+                        and exit_confidence > fuzzy_threshold
+                        and not trajectory_override
+                        and not peak_suppression
+                    ):
                         return True, ExitReason.TAKE_PROFIT, (
                             f"[FUZZY HIGH] Exit confidence: {exit_confidence:.2%} "
                             f"(profit=${current_profit:.2f}, tier={tier}, threshold={fuzzy_threshold:.0%}{adj_str})"
+                        )
+                    elif current_profit < profit_exit_floor and exit_confidence > fuzzy_threshold:
+                        logger.info(
+                            f"[FUZZY SUPPRESSED] Exit confidence {exit_confidence:.2%} > {fuzzy_threshold:.0%} "
+                            f"but profit ${current_profit:.2f} is below risk-scaled floor ${profit_exit_floor:.2f}"
                         )
                     elif trajectory_override:
                         # Log but don't exit - trajectory prediction says hold
@@ -1656,7 +1667,7 @@ class SmartRiskManager:
         # === CHECK 0A.3: VELOCITY CRASH OVERRIDE (v0.2.1 FIX 3) ===
         # Emergency exit when velocity FLIPS from strong positive to negative
         # This catches extreme momentum crashes that fuzzy logic might delay
-        if current_profit > 0 and _vel < -0.05:
+        if current_profit >= profit_exit_floor and _vel < -0.05:
             # Check if velocity was previously positive (crash!)
             if len(guard.velocity_history) >= 2:
                 prev_velocity = guard.velocity_history[-2] if len(guard.velocity_history) > 1 else 0
@@ -1667,7 +1678,7 @@ class SmartRiskManager:
                         return True, ExitReason.TAKE_PROFIT, (
                             f"[VELOCITY CRASH] Emergency exit! "
                             f"Velocity crashed {prev_velocity:.3f} -> {_vel:.3f} (Δ{velocity_drop:.3f}), "
-                            f"profit=${current_profit:.2f}"
+                            f"profit=${current_profit:.2f}, floor=${profit_exit_floor:.2f}"
                         )
 
         # === CHECK 0A.4: PEAK DETECTION (v0.2.2 Professor AI Fix #2) ===
