@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 load_dotenv()
+symbol = os.getenv("SYMBOL", "XAUUSD")
 
 import MetaTrader5 as mt5
 
@@ -17,8 +18,9 @@ mt5.initialize(
 )
 
 # Get current tick
-tick = mt5.symbol_info_tick("XAUUSD")
+tick = mt5.symbol_info_tick(symbol)
 current_price = tick.bid
+print(f"Symbol: {symbol}")
 print(f"Current price: {current_price:.2f}")
 
 # Get open positions

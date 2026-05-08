@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
+SYMBOL = os.getenv("SYMBOL", "XAUUSD")
 
 def check_bot_health():
     """Check if bot is running and healthy"""
@@ -207,7 +208,7 @@ def check_open_positions():
         return
 
     try:
-        positions = mt5.positions_get(symbol="XAUUSD")
+        positions = mt5.positions_get(symbol=SYMBOL)
         if not positions or len(positions) == 0:
             print("No open positions")
             return

@@ -415,6 +415,36 @@ class TradingBot:
 
         return False
 
+    def _sync_capital_from_account(self, account_balance: float):
+        """Use the connected MT5 balance as the live capital baseline."""
+        if not account_balance or account_balance <= 0:
+            logger.warning("Could not sync capital from MT5 account balance")
+            return
+
+        old_capital = self.config.capital
+        if abs(old_capital - account_balance) < 0.01:
+            self.smart_risk.update_capital(account_balance)
+            return
+
+        self.config.capital = float(account_balance)
+        self.config._configure_by_capital()
+        self._apply_env_risk_overrides()
+        self.smart_risk.update_capital(float(account_balance))
+
+        logger.info(f"Capital synced from MT5 balance: ${old_capital:,.2f} -> ${account_balance:,.2f}")
+        logger.info(f"Mode after sync: {self.config.capital_mode.value}")
+
+    def _apply_env_risk_overrides(self):
+        """Preserve explicit .env risk knobs after capital-mode recalculation."""
+        if os.getenv("RISK_PER_TRADE"):
+            self.config.risk.risk_per_trade = float(os.getenv("RISK_PER_TRADE"))
+        if os.getenv("MAX_DAILY_LOSS_PERCENT"):
+            self.config.risk.max_daily_loss = float(os.getenv("MAX_DAILY_LOSS_PERCENT"))
+        if os.getenv("MAX_POSITION_SIZE"):
+            self.config.risk.max_lot_size = float(os.getenv("MAX_POSITION_SIZE"))
+        if os.getenv("MIN_LOT_SIZE"):
+            self.config.risk.min_lot_size = float(os.getenv("MIN_LOT_SIZE"))
+
     def _dash_log(self, level: str, message: str):
         """Add log entry to dashboard buffer."""
         now = datetime.now(ZoneInfo("Asia/Jakarta"))
@@ -898,6 +928,7 @@ class TradingBot:
             equity = self.mt5.account_equity
             logger.info(f"Account Balance: ${balance:,.2f}")
             logger.info(f"Account Equity: ${equity:,.2f}")
+            self._sync_capital_from_account(balance)
 
             # Show session status
             session_status = self.session_filter.get_status_report()

@@ -28,6 +28,8 @@ loguru>=0.7.2
 
 # Environment Variables
 python-dotenv>=1.0.1
+tzdata>=2025.2  # IANA timezone database for Windows zoneinfo
+pytz>=2025.2
 
 # Numerical Computing (for numpy-based SMC algorithms)
 numpy>=1.26.0

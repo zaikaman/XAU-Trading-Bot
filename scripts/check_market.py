@@ -10,18 +10,20 @@ from src.mt5_connector import MT5Connector
 from src.smc_polars import SMCAnalyzer
 from src.config import TradingConfig
 
-config = TradingConfig()
+config = TradingConfig.from_env()
 mt5 = MT5Connector(config.mt5_login, config.mt5_password, config.mt5_server, config.mt5_path)
 mt5.connect()
 
 # Get data
-df = mt5.get_market_data('XAUUSD', 'M15', 500)
+symbol = config.symbol
+df = mt5.get_market_data(symbol, 'M15', 500)
 print('=== MARKET DATA ===')
+print(f'Symbol: {symbol}')
 print(f'Candles: {len(df)}')
 print(f'Last close: {df["close"].tail(1).item():.2f}')
 
 # Current price
-tick = mt5.get_tick('XAUUSD')
+tick = mt5.get_tick(symbol)
 print(f'Bid: {tick.bid:.2f}, Ask: {tick.ask:.2f}')
 print(f'Spread: {(tick.ask - tick.bid):.2f}')
 

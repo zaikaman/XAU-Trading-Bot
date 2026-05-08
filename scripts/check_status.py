@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
 load_dotenv()
+symbol = os.getenv('SYMBOL', 'XAUUSD')
 
 mt5.initialize()
 mt5.login(
@@ -27,7 +28,8 @@ print(f'Profit: ${info.profit:,.2f}')
 print(f'Margin: ${info.margin:,.2f}')
 
 # Open positions
-positions = mt5.positions_get(symbol='XAUUSD')
+positions = mt5.positions_get(symbol=symbol)
+print(f'\nSymbol: {symbol}')
 print(f'\nOpen Positions: {len(positions) if positions else 0}')
 if positions:
     total_profit = 0
